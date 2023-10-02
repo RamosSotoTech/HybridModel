@@ -1,0 +1,7 @@
+requests~=2.31.0
+beautifulsoup4~=4.12.2
+transformers~=4.32.1
+keras~=2.13.1
+rouge~=1.0.1
+datasets~=2.14.5
+huggingface_hub~=0.15.1
