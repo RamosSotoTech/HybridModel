@@ -23,7 +23,7 @@ class HybridModel(tf.keras.Model):
         gpt2_hidden_dim = self.gpt2_decoder.config.n_embd
         # Initialize intermediate dense layer with L2 regularization
         self.intermediate = tf.keras.layers.Dense(gpt2_hidden_dim,
-                                                  kernel_regularizer=l2(regularization_factor))
+                                                 kernel_regularizer=l2(regularization_factor))
         self.loss_fn = loss_function
         self.dropout = tf.keras.layers.Dropout(dropout_rate)
         self.batch_norm = tf.keras.layers.BatchNormalization()
@@ -33,11 +33,25 @@ class HybridModel(tf.keras.Model):
         self.writer = tf.summary.create_file_writer('logs/')
         self.learning_rate = learning_rate
 
-    def call(self, input_ids, attention_mask=None, training=False):
-        bert_outputs = self.bert_encoder(input_ids, attention_mask=attention_mask)[0]
-        bert_cls_output = bert_outputs[:, 0, :]
-        intermediate_output = self.intermediate(bert_cls_output)
+    def call(self, input_segments, attention_masks=None, training=False):
+        # Step 1: Sentence/Paragraph Encoding
+        segment_representations = []
+        for i, input_ids in enumerate(input_segments):
+            attention_mask = attention_masks[i] if attention_masks else None
+            bert_output = self.bert_encoder(input_ids, attention_mask=attention_mask)[0]
+            segment_representations.append(bert_output[:, 0, :])
+
+        # Step 2: Aggregation Layer
+        segment_representations = tf.stack(segment_representations, axis=1)  # Shape: [batch_size, num_segments, hidden_dim]
+        # Implement a simple attention mechanism
+        attention_weights = tf.keras.layers.Attention()([segment_representations, segment_representations])
+        document_representation = tf.reduce_sum(attention_weights * segment_representations, axis=1)
+
+        # Feed through intermediate layers
+        intermediate_output = self.intermediate(document_representation)
         intermediate_output = self.batch_norm(intermediate_output, training)
+
+        # Step 3: Decoding
         gpt2_outputs = self.gpt2_decoder(inputs_embeds=intermediate_output)[0]
         return gpt2_outputs
 

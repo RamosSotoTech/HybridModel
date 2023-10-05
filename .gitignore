@@ -1,2 +1,5 @@
 /scripts/SummarizationDataset/cnn_dailymail/
 .idea
+tmp/
+__pycache__/
+datasets/preprocessed_training_data.pkl
