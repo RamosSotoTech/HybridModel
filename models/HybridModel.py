@@ -6,6 +6,8 @@ from rouge import Rouge
 import pickle
 
 
+# Define the CustomLayer
+
 class HybridModel(tf.keras.Model):
     def __init__(self,
                  bert_model_name='bert-base-uncased',
@@ -23,7 +25,7 @@ class HybridModel(tf.keras.Model):
         gpt2_hidden_dim = self.gpt2_decoder.config.n_embd
         # Initialize intermediate dense layer with L2 regularization
         self.intermediate = tf.keras.layers.Dense(gpt2_hidden_dim,
-                                                 kernel_regularizer=l2(regularization_factor))
+                                                  kernel_regularizer=l2(regularization_factor))
         self.loss_fn = loss_function
         self.dropout = tf.keras.layers.Dropout(dropout_rate)
         self.batch_norm = tf.keras.layers.BatchNormalization()
@@ -33,16 +35,27 @@ class HybridModel(tf.keras.Model):
         self.writer = tf.summary.create_file_writer('logs/')
         self.learning_rate = learning_rate
 
-    def call(self, input_segments, attention_masks=None, training=False):
-        # Step 1: Sentence/Paragraph Encoding
+    def call(self, input_segments, sequence_lengths, attention_masks=None, training=False):
+        if attention_masks is not None:
+            if not tf.is_tensor(attention_masks):
+                raise ValueError("attention_masks must be a tensor.")
+        # Verify input tensor dimensions
+        if len(input_segments.shape) != 2:
+            raise ValueError("Expected input_segments to have 2 dimensions, got {}".format(input_segments.shape))
+
+        # Initialize list to store segment representations
         segment_representations = []
-        for i, input_ids in enumerate(input_segments):
-            attention_mask = attention_masks[i] if attention_masks else None
+
+        # Loop over each segment in the batch
+        for i in range(input_segments.shape[0]):
+            input_ids = input_segments[i, :sequence_lengths[i]]
+            attention_mask = attention_masks[i, :sequence_lengths[i]] if attention_masks is not None else None
+
+            # Obtain BERT representation for each segment
             bert_output = self.bert_encoder(input_ids, attention_mask=attention_mask)[0]
             segment_representations.append(bert_output[:, 0, :])
 
         # Step 2: Aggregation Layer
-        segment_representations = tf.stack(segment_representations, axis=1)  # Shape: [batch_size, num_segments, hidden_dim]
         # Implement a simple attention mechanism
         attention_weights = tf.keras.layers.Attention()([segment_representations, segment_representations])
         document_representation = tf.reduce_sum(attention_weights * segment_representations, axis=1)
@@ -53,7 +66,43 @@ class HybridModel(tf.keras.Model):
 
         # Step 3: Decoding
         gpt2_outputs = self.gpt2_decoder(inputs_embeds=intermediate_output)[0]
+
         return gpt2_outputs
+
+
+
+    # def call(self, input_segments, attention_masks=None, training=False):
+    #     print(f"Debug: input_segments shape: {tf.shape(input_segments)}")
+    #     print(f"Debug: attention_masks shape: {tf.shape(attention_masks)}")
+    #     input_segments = tf.stack(input_segments)
+    #     if attention_masks is not None:
+    #         attention_masks = tf.stack(attention_masks)
+    #
+    #     # Step 1: Sentence/Paragraph Encoding
+    #     segment_representations = []
+    #     for i, input_ids in enumerate(input_segments):
+    #         attention_mask = attention_masks[i] if attention_masks else None
+    #
+    #         print(f"Debug: input_segments shape: {tf.shape(input_segments)}")
+    #         print(f"Debug: attention_masks shape: {tf.shape(attention_masks)}")
+    #
+    #         bert_output = self.bert_encoder(input_ids, attention_mask=attention_mask)[0]
+    #         segment_representations.append(bert_output[:, 0, :])
+    #
+    #     # Step 2: Aggregation Layer
+    #     segment_representations = tf.stack(segment_representations,
+    #                                        axis=1)  # Shape: [batch_size, num_segments, hidden_dim]
+    #     # Implement a simple attention mechanism
+    #     attention_weights = tf.keras.layers.Attention()([segment_representations, segment_representations])
+    #     document_representation = tf.reduce_sum(attention_weights * segment_representations, axis=1)
+    #
+    #     # Feed through intermediate layers
+    #     intermediate_output = self.intermediate(document_representation)
+    #     intermediate_output = self.batch_norm(intermediate_output, training)
+    #
+    #     # Step 3: Decoding
+    #     gpt2_outputs = self.gpt2_decoder(inputs_embeds=intermediate_output)[0]
+    #     return gpt2_outputs
 
     def training_step(self, batch):
         input_ids = batch['input_ids']

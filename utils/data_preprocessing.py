@@ -1,4 +1,5 @@
 import os
+import pathlib
 import pickle
 import re
 from typing import List, Dict, Tuple
@@ -12,6 +13,10 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from tqdm import tqdm
 from transformers import BertTokenizer, GPT2Tokenizer, PreTrainedTokenizer
+import h5py
+
+# cnn_dataset = datasets.load_dataset("cnn_dailymail", "3.0.0")
+# cnn_dataset.save_to_disk("/Users/PC/PycharmProjects/TLDR/datasets/cnn_dailymail")
 
 
 def load_datasets(path):
@@ -52,15 +57,15 @@ def preprocess_dataset(dataset: Dataset, bert_tokenizer: PreTrainedTokenizer,
 
     assert isinstance(dataset, Dataset), f"Expected datasets.arrow_dataset.Dataset but received {type(dataset)}"
 
-    def tokenization_function(entry):
-        return hierarchical_tokenization(entry, bert_tokenizer=bert_tokenizer, gpt2_tokenizer=gpt2_tokenizer)
+    # def tokenization_function(entry):
+    #     return hierarchical_tokenization(entry, bert_tokenizer=bert_tokenizer, gpt2_tokenizer=gpt2_tokenizer)
 
-    tokenized_dataset = dataset.map(tokenization_function)
+    tokenized_dataset = hierarchical_tokenization(dataset, bert_tokenizer=bert_tokenizer, gpt2_tokenizer=gpt2_tokenizer)#dataset.map(tokenization_function)
 
     return tokenized_dataset
 
 
-def create_tf_dataset(tokenized_data):
+def create_tf_dataset1(tokenized_data):
     def gen():
         for entry in tokenized_data:
             yield entry['bert_input_segments'], entry['attention_masks'], entry['gpt2_input_ids']
@@ -85,7 +90,32 @@ def create_tf_dataset(tokenized_data):
     return dataset
 
 
-tmp_dir = "/Users/PC/PycharmProjects/TLDR/tmp"
+def create_tf_dataset(tokenized_data: Dataset):
+    def gen():
+        for entry in tokenized_data:
+            yield entry['bert_input_segments'], entry['bert_attention_masks'], entry['gpt2_input_ids']
+
+    def map_function(input_segments, attention_masks, gpt2_input_ids):
+        return (
+            dict(input_segments=input_segments, attention_masks=attention_masks),
+            gpt2_input_ids
+        )
+
+    dataset = tf.data.Dataset.from_generator(
+        gen,
+        output_signature=(
+            tf.TensorSpec(shape=(None, None, 512), dtype=tf.int32),
+            tf.TensorSpec(shape=(None, None, 512), dtype=tf.int32),
+            tf.TensorSpec(shape=(512,), dtype=tf.int32)
+        )
+    )
+    dataset = dataset.map(map_function)
+    dataset = dataset.batch(8).shuffle(buffer_size=1000).prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+
+    return dataset
+
+
+tmp_dir = pathlib.Path("/Users/PC/PycharmProjects/TLDR/tmp")
 
 
 def split_dataset(deduplicated_data: Dataset, train_ratio: float, val_ratio: float) -> (Dataset, Dataset, Dataset):
@@ -113,7 +143,7 @@ def split_dataset(deduplicated_data: Dataset, train_ratio: float, val_ratio: flo
     return train_data_raw, val_data_raw, test_data_raw
 
 
-def main_pipeline(path, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1):
+def main_pipeline(path='/Users/PC/PycharmProjects/TLDR/datasets/cnn_dailymail', train_ratio=0.8, val_ratio=0.1, test_ratio=0.1):
     # Ensure the ratios sum up to 1
     assert train_ratio + val_ratio + test_ratio == 1.0, "Ratios should sum up to 1."
 
@@ -169,6 +199,20 @@ def main_pipeline(path, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1):
     val_dataset = create_tf_dataset(val_data)
 
     return train_dataset, test_dataset, val_dataset
+
+
+def save_to_hdf5(prefetch_dataset, file_path):
+    with h5py.File(file_path, 'w') as hf:
+        for i, (input_dict, labels) in enumerate(prefetch_dataset):
+            grp = hf.create_group(str(i))
+
+            # Save input dictionary
+            input_grp = grp.create_group('input')
+            for key, value in input_dict.items():
+                input_grp.create_dataset(key, data=value.numpy())
+
+            # Save labels
+            grp.create_dataset('labels', data=labels.numpy())
 
 
 def load_raw_data(save_dir='saved_data'):
@@ -427,7 +471,131 @@ def custom_preprocessing(dataset: List[Dict], bert_tokenizer: BertTokenizer, gpt
     return bert_input_ids_list, bert_attention_masks_list, gpt2_input_ids_list
 
 
-def hierarchical_tokenization(dataset: List[Dict], bert_tokenizer: BertTokenizer, gpt2_tokenizer: GPT2Tokenizer) -> \
+
+def hierarchical_tokenization1(dataset: Dataset, bert_tokenizer, gpt2_tokenizer) -> Dataset:
+    """
+    Conducts hierarchical tokenization for a hybrid model.
+
+    Parameters:
+    - dataset: datasets.arrow_dataset.Dataset object, each entry containing 'id', 'article', and 'highlights'
+    - bert_tokenizer: BertTokenizer, specifies the pretrained BERT model to use
+    - gpt2_tokenizer: GPT2Tokenizer, specifies the pretrained GPT-2 model to use
+
+    Returns:
+    - datasets.arrow_dataset.Dataset: tokenized_data
+    """
+    max_length = 512  # BERT's maximum token length
+
+    def tokenize_entry(entry: Dict):
+        article = clean_text(entry['article'])
+        highlights = clean_text(entry['highlights'])
+
+        # BERT tokenization for the entire article
+        encoded_article = bert_tokenizer.encode_plus(
+            article,
+            add_special_tokens=True,
+            return_attention_mask=True,
+            return_tensors="np",
+            max_length=None,
+            truncation=False
+        )
+
+        # Divide article into chunks
+        input_ids = encoded_article['input_ids'][0]
+        attention_mask = encoded_article['attention_mask'][0]
+
+        segment_input_ids = [input_ids[i:i + max_length] for i in range(0, len(input_ids), max_length - 1)]
+        segment_attention_masks = [attention_mask[i:i + max_length] for i in
+                                   range(0, len(attention_mask), max_length - 1)]
+
+        # GPT-2 tokenization for the highlights
+        gpt2_tokenized_highlights = gpt2_tokenizer.encode_plus(
+            highlights,
+            add_special_tokens=True,
+            return_tensors="np"
+        )
+
+        # Create entry for tokenized data
+        return {
+            'id': entry['id'],
+            'bert_input_segments': segment_input_ids,
+            'bert_attention_masks': segment_attention_masks,
+            'gpt2_input_ids': gpt2_tokenized_highlights['input_ids']
+        }
+
+    # Tokenize all entries in the dataset
+    tokenized_data = dataset.map(tokenize_entry)
+
+    return tokenized_data
+
+
+def hierarchical_tokenization(dataset: Dataset, bert_tokenizer, gpt2_tokenizer) -> Dataset:
+    """
+    Conducts hierarchical tokenization for a hybrid model.
+
+    Parameters:
+    - dataset: datasets.arrow_dataset.Dataset object, each entry containing 'id', 'article', and 'highlights'
+    - bert_tokenizer: BertTokenizer, specifies the pretrained BERT model to use
+    - gpt2_tokenizer: GPT2Tokenizer, specifies the pretrained GPT-2 model to use
+
+    Returns:
+    - datasets.arrow_dataset.Dataset: tokenized_data
+    """
+    max_length = 512  # BERT's maximum token length
+
+    def tokenize_entry(entry: Dict):
+        article = clean_text(entry['article'])
+        highlights = clean_text(entry['highlights'])
+
+        # BERT tokenization for the entire article
+        encoded_article = bert_tokenizer.encode_plus(
+            article,
+            add_special_tokens=False,  # Handle special tokens manually for segments
+            return_attention_mask=True,
+            return_tensors="tf",
+            max_length=None,
+            truncation=False
+        )
+
+        # Divide article into chunks
+        input_ids = encoded_article['input_ids'][0]
+        attention_mask = encoded_article['attention_mask'][0]
+
+        segment_input_ids = [tf.concat([[101], input_ids[i:i + max_length - 2], [102]], axis=0) for i in
+                             range(0, len(input_ids), max_length - 2)]
+        segment_attention_masks = [tf.concat([[1], attention_mask[i:i + max_length - 2], [1]], axis=0) for i in
+                                   range(0, len(attention_mask), max_length - 2)]
+
+        # Pad if necessary
+        segment_input_ids = [tf.pad(x, paddings=[[0, max_length - tf.shape(x)[0]]], mode='CONSTANT', constant_values=0)
+                             for x in segment_input_ids]
+        segment_attention_masks = [
+            tf.pad(x, paddings=[[0, max_length - tf.shape(x)[0]]], mode='CONSTANT', constant_values=0) for x in
+            segment_attention_masks]
+
+        # GPT-2 tokenization for the highlights
+        gpt2_tokenized_highlights = gpt2_tokenizer.encode_plus(
+            highlights,
+            add_special_tokens=True,
+            return_tensors="tf"
+        )
+
+        # Create entry for tokenized data
+        return {
+            'id': entry['id'],
+            'bert_input_segments': tf.stack(segment_input_ids),
+            'bert_attention_masks': tf.stack(segment_attention_masks),
+            'gpt2_input_ids': gpt2_tokenized_highlights['input_ids'],
+            'sequence_lengths': tf.convert_to_tensor([len(x) for x in segment_input_ids])
+        }
+
+    # Tokenize all entries in the dataset
+    tokenized_data = dataset.map(tokenize_entry)
+
+    return tokenized_data
+
+
+def hierarchical_tokenization2(dataset: List[Dict], bert_tokenizer: BertTokenizer, gpt2_tokenizer: GPT2Tokenizer) -> \
         List[Dict]:
     """
     Conducts hierarchical tokenization for a hybrid model.
@@ -444,7 +612,6 @@ def hierarchical_tokenization(dataset: List[Dict], bert_tokenizer: BertTokenizer
     max_length = 512  # BERT's maximum token length
 
     for entry in dataset:
-        print(type(entry), entry)
         article = clean_text(entry['article'])
         highlights = clean_text(entry['highlights'])
 

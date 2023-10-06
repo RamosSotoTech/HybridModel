@@ -3,3 +3,8 @@
 tmp/
 __pycache__/
 datasets/preprocessed_training_data.pkl
+/utils/datasets/
+/models/logs/
+/utils/datasets/cnn_dailymail/
+/datasets/cnn_dailymail/
+/logs/
